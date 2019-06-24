@@ -6,14 +6,7 @@
   <groupId>com.redhat.events</groupId>
   <artifactId>event-analysis-web</artifactId>
   <version>1.0.0</version>
-   <distributionManagement>
-    <repository>
-      <id>maven-DM</id>
-      <name>maven-DM</name>
-      <url>http://nexus-nexus.192.168.99.100.nip.io/repository/maven-DM/</url>
-      <layout>default</layout>
-    </repository>
-  </distributionManagement>
+   
 
   <dependencies>
     <dependency>
@@ -99,12 +92,24 @@
       </plugin>
     </plugins>
   </build>
-  <repositories>
-    <repository>
-      <id>maven-DM</id>
-      <name>maven-DM</name>
-      <url>http://nexus-nexus.192.168.99.100.nip.io/repository/maven-DM/</url>
-    </repository>
-  </repositories>
-
+  <profiles>
+    <profile>
+      <id>openshift</id>
+      <repositories>
+        <repository>
+          <id>maven-releases</id>
+          <name>maven-releases</name>
+          <url>${env.NEXUSREPO}/repository/maven-releases/</url>
+        </repository>
+      </repositories>
+      <distributionManagement>
+        <repository>
+          <id>maven-releases</id>
+          <name>maven-releases</name>
+          <url>${env.NEXUSREPO}/repository/maven-releases/</url>
+          <layout>default</layout>
+        </repository>
+      </distributionManagement>
+    </profile>
+  </profiles>
 </project>
