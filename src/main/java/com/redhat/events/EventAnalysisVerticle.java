@@ -42,7 +42,7 @@ public class EventAnalysisVerticle extends AbstractVerticle {
 
     private void init() {
         Properties config = new Properties();
-        config.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "my-cluster-kafka-brokers:9092");
+        config.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "my-cluster-kafka:9092");
         config.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         config.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
 
