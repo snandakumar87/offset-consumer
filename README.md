@@ -18,7 +18,7 @@ mvn clean package
 Once packaged, just launch the _fat jar_ as follows:
 
 ```
-java -jar target/order-mgmt-app-1.0.0-fat.jar
+java -jar target/event-analysis-web-1.0.0-fat.jar
 ```
 
 Then, open a browser to http://localhost:8180.
