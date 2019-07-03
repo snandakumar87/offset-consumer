@@ -22,13 +22,13 @@
 var app = angular.module('myApp-payments', []);
 app.controller('FormController-Payments', function($scope,$http) {
 
-
+var baseURL = window.location.protocol + '//' + window.location.host;
 
 $scope.insertPaymentEvent = function() {
 
 
 $http({
-        url: 'http://event-analysis-webapp-kafka.192.168.99.100.nip.io/paymentPost',
+        url: baseURL+'/paymentPost',
         method: "POST"
 
     })
