@@ -1,25 +1,23 @@
 package com.redhat.events;
 
-import com.Event;
-import com.eventAnalysis;
-import com.google.gson.Gson;
 import io.vertx.core.AbstractVerticle;
 import io.vertx.core.Future;
-import io.vertx.core.Vertx;
-import io.vertx.core.json.Json;
 import io.vertx.ext.web.Router;
-import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.client.WebClient;
 import io.vertx.ext.web.client.WebClientOptions;
 import io.vertx.ext.web.handler.BodyHandler;
 import io.vertx.ext.web.handler.StaticHandler;
-import io.vertx.kafka.client.consumer.KafkaConsumer;
-import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.*;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.apache.kafka.connect.mirror.RemoteClusterUtils;
 
+import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
 
 public class EventAnalysisVerticle extends AbstractVerticle {
     
@@ -27,114 +25,125 @@ public class EventAnalysisVerticle extends AbstractVerticle {
     private static final AtomicInteger COUNTER = new AtomicInteger();
 
 
-    private WebClient client;
-    private eventAnalysis eventAnalysis;
-    private Set<eventAnalysis> offersHome = new HashSet<>();
-    private Set<eventAnalysis> paymentsHome = new HashSet<>();
-
-    private List<Event> customer1EventList = new ArrayList<>();
-    private Set<AlertMapObj> alertMap = new HashSet<>();
-
-
-
-    private Event event;
-
 
     private void init() {
-        Properties config = new Properties();
-        config.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "my-cluster-kafka-brokers:9092");
+
+        Map<String, Object> config = new HashMap();
+        config.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "operational-cluster-kafka-bootstrap:9092");
         config.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         config.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-
+        config.put(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, "1000");
         config.put("key.serializer", StringSerializer.class);
         config.put("value.serializer", StringSerializer.class);
         config.put("group.id", "another_grp");
         config.put("auto.offset.reset", "earliest");
-        config.put("enable.auto.commit", "false");
+        config.put("enable.auto.commit", "true");
 
-        KafkaConsumer<String, String> customerEvents = getKafkaConsumerCustomerEvents(config,vertx);
+        org.apache.kafka.clients.consumer.KafkaConsumer<String, String> consumer = new org.apache.kafka.clients.consumer.KafkaConsumer<String, String>(config);
 
-        customerEvents.handler(record -> {
-           
-            Map<String, Object> value = new Gson().fromJson(record.value(),Map.class);
-
- 
-
-                    event = new Gson().fromJson(new Gson().toJson(value), com.Event.class);
-
-
-            System.out.print("Event"+ event);
-            if(null != event && null != event.getEventCategory()) {
-                customer1EventList.add(event);
+        ConsumerRebalanceListener offsetHandler = new ConsumerRebalanceListener() {
+            @Override
+            public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
 
             }
-        });
 
+            @Override
+            public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
+                List<Map<TopicPartition, OffsetAndMetadata>> mirroredOffsets = getMirroredOffsets();
 
-        // use consumer for interacting with Apache Kafka
-        KafkaConsumer<String, String> consumer = getKafkaConsumer(config,vertx);
+                for (TopicPartition partition : partitions) {
+                    OffsetAndMetadata mirroredOffset = findHighestMirroredOffset(mirroredOffsets, partition);
+                    OffsetAndMetadata localOffset = consumer.committed(Collections.singleton(partition)).get(partition);
 
+                    if (mirroredOffset != null) {
+                        if (localOffset != null)    {
+                            if (mirroredOffset.offset() > localOffset.offset()) {
+                                System.out.println("Seeking to {} in {} (higher than local offset {})"+mirroredOffset.offset()+partition+localOffset.offset());
+                                consumer.seek(partition, mirroredOffset);
+                            } else {
+                                System.out.println("Keeping local offset {} in {} (higher than mirrored offset {})"+localOffset.offset()+partition+ mirroredOffset.offset());
+                            }
+                        } else {
+                            System.out.println("Seeking to {} in {} (local offset does not exist)"+ mirroredOffset.offset()+partition);
+                            consumer.seek(partition, mirroredOffset);
+                        }
+                    } else {
+                        System.out.println("Mirrored offset does not exist for partition {}"+partition);
+                    }
+                }
+            }
 
+            public OffsetAndMetadata findHighestMirroredOffset(List<Map<TopicPartition, OffsetAndMetadata>> mirroredOffsets, TopicPartition partition) {
+                OffsetAndMetadata foundOffset = null;
 
-        consumer.handler(record -> {
-
-            if(record.key().equalsIgnoreCase("\"John\"")) {
-
-
-                Map<String, Object> value = new Gson().fromJson(record.value(),Map.class);
-
-                for(String key:value.keySet()) {
-                    if(key.equals("value")) {
-
-                        eventAnalysis = new Gson().fromJson(new Gson().toJson(value.get(key)), com.eventAnalysis.class);
+                for (Map<TopicPartition, OffsetAndMetadata> offsets : mirroredOffsets)  {
+                    if (offsets.containsKey(partition)) {
+                        if (foundOffset == null)    {
+                            foundOffset = offsets.get(partition);
+                        } else  {
+                            OffsetAndMetadata newOffset = offsets.get(partition);
+                            if (foundOffset.offset() < newOffset.offset())   {
+                                foundOffset = newOffset;
+                            }
+                        }
                     }
                 }
 
-
-                if(null != eventAnalysis && null != eventAnalysis.getEventResponsePayload()) {
-                    offersHome.add(eventAnalysis);
-
-                }
-
+                return foundOffset;
             }
 
-            if(record.key().equalsIgnoreCase("\"James\"")) {
+            public List<Map<TopicPartition, OffsetAndMetadata>> getMirroredOffsets() {
+                Set<String> clusters = null;
+                try {
+                    clusters = RemoteClusterUtils.upstreamClusters(config);
+                } catch (InterruptedException e) {
+                    System.out.println("Failed to get remote cluster"+ e);
+                    return Collections.emptyList();
+                } catch (TimeoutException e) {
+                    System.out.println("Failed to get remote cluster"+ e);
+                    return Collections.emptyList();
+                }
 
+                List<Map<TopicPartition, OffsetAndMetadata>> mirroredOffsets = new ArrayList<>();
 
-
-
-                Map<String, Object> value = new Gson().fromJson(record.value(),Map.class);
-
-                for(String key:value.keySet()) {
-                    if(key.equals("value")) {
-
-                        eventAnalysis = new Gson().fromJson(new Gson().toJson(value.get(key)), com.eventAnalysis.class);
+                for (String cluster : clusters) {
+                    try {
+                        mirroredOffsets.add(RemoteClusterUtils.translateOffsets(config, cluster, config.get(ConsumerConfig.GROUP_ID_CONFIG).toString(), Duration.ofMinutes(1)));
+                    } catch (InterruptedException e) {
+                       System.out.println("Failed to translate offsets"+ e);
+                        e.printStackTrace();
+                    } catch (TimeoutException e) {
+                        System.out.println("Failed to translate offsets"+ e);
                     }
                 }
 
+                return mirroredOffsets;
+            }
+        };
 
-                if(null != eventAnalysis && null != eventAnalysis.getEventResponsePayload()) {
-                    paymentsHome.add(eventAnalysis);
-                }
 
+        consumer.subscribe(Pattern.compile(".*transaction-whitelist"), offsetHandler);
+
+        int messageNo = 0;
+
+        while (true)
+        {
+            ConsumerRecords<String, String> records = consumer.poll(60000);
+
+            if(records.isEmpty()) {
+               System.out.println("No message in topic for {} seconds. Finishing ..."+60000/1000);
+                break;
             }
 
+            for (ConsumerRecord<String, String> record : records)
+            {
+               System.out.println("Received message no. {}: {} / {} (from topic {}, partition {}, offset {})"+ ++messageNo+ record.key()+ record.value()+ record.topic()+ record.partition()+ record.offset());
+            }
 
-        });
+            consumer.commitSync();
+        }
 
-        KafkaConsumer<String, String> atmEvents = getFraudPatternStream(config,vertx);
-        alertMap = new HashSet<>();
-
-        atmEvents.handler(record -> {
-           AlertMapObj  alertMapObj = new AlertMapObj();
-           alertMapObj.setUserId(record.key().replaceAll("\"",""));
-
-           alertMapObj.setNoOfAttempts(record.value());
-           alertMap.add(alertMapObj);
-
-        });
-
-        System.out.println("Alert Map:"+alertMap);
+        consumer.close();
 
 
     }
@@ -144,23 +153,13 @@ public class EventAnalysisVerticle extends AbstractVerticle {
 
         WebClientOptions options = new WebClientOptions();
         options.setKeepAlive(false);
-        client = WebClient.create(vertx, options);
+        WebClient client = WebClient.create(vertx, options);
 
         init();
 
         Router router = Router.router(vertx);
 
         router.route().handler(BodyHandler.create());
-
-        router.post("/homePost").handler(this::postHome);
-
-        router.post("/paymentPost").handler(this::postPayments);
-        router.post("/offerStream").handler(this::offerStream);
-
-        router.post("/eventStream").handler(this::eventStream);
-
-        router.post("/alertMap").handler(this::alertMap);
-
 
 
         router.route("/static/*").handler(StaticHandler.create("assets"));
@@ -177,107 +176,5 @@ public class EventAnalysisVerticle extends AbstractVerticle {
 
 
 
-
-    private void postHome(RoutingContext routingContext) {
-
-
-
-
-        if(null != offersHome && !offersHome.isEmpty()) {
-            routingContext.response().setStatusCode(201).putHeader("content-type", "application/json")
-                    .end(Json.encodePrettily(new Gson().toJson(offersHome)));
-        }
-
-
-
-    }
-
-    private void alertMap(RoutingContext routingContext) {
-
-
-
-
-        if(null != alertMap && !alertMap.isEmpty()) {
-            routingContext.response().setStatusCode(201).putHeader("content-type", "application/json")
-                    .end(Json.encodePrettily(new Gson().toJson(alertMap)));
-        }
-
-
-
-    }
-
-    private void offerStream(RoutingContext routingContext) {
-
-
-
-
-        if(null != offersHome && !offersHome.isEmpty()) {
-            routingContext.response().setStatusCode(201).putHeader("content-type", "application/json")
-                    .end(Json.encodePrettily(new Gson().toJson(offersHome)));
-        }
-
-
-
-    }
-
-    private void eventStream(RoutingContext routingContext) {
-
-
-
-
-        if(null != customer1EventList && !customer1EventList.isEmpty()) {
-            routingContext.response().setStatusCode(201).putHeader("content-type", "application/json")
-                    .end(Json.encodePrettily(new Gson().toJson(customer1EventList)));
-        }
-
-
-
-    }
-
-    private void postPayments(RoutingContext routingContext) {
-
-
-        if(null != paymentsHome && !paymentsHome.isEmpty()) {
-            routingContext.response().setStatusCode(201).putHeader("content-type", "application/json")
-                    .end(Json.encodePrettily(new Gson().toJson(paymentsHome)));
-        }
-
-    }
-
-    private static KafkaConsumer<String, String> getKafkaConsumer(Properties config, Vertx vertx) {
-        KafkaConsumer<String, String> consumer = KafkaConsumer.create(vertx, config);
-
-
-        // subscribe to several topics
-        Set<String> topics = new HashSet<>();
-        topics.add("offer-output-stream");
-
-        consumer.subscribe(topics);
-        return consumer;
-    }
-
-    private static KafkaConsumer<String, String> getKafkaConsumerCustomerEvents(Properties config, Vertx vertx) {
-        KafkaConsumer<String, String> consumer = KafkaConsumer.create(vertx, config);
-
-
-        // subscribe to several topics
-        Set<String> topics = new HashSet<>();
-        topics.add("event-input-stream");
-
-        consumer.subscribe(topics);
-        return consumer;
-    }
-
-    private static KafkaConsumer<String, String> getFraudPatternStream(Properties config, Vertx vertx) {
-        KafkaConsumer<String, String> consumer = KafkaConsumer.create(vertx, config);
-
-
-        // subscribe to several topics
-        Set<String> topics = new HashSet<>();
-        topics.add("ATM_Response");
-
-        consumer.subscribe(topics);
-        return consumer;
-    }
 
 }
