@@ -1,8 +1,11 @@
 package com.redhat.events;
 
+import com.google.gson.Gson;
 import io.vertx.core.AbstractVerticle;
 import io.vertx.core.Future;
+import io.vertx.core.json.Json;
 import io.vertx.ext.web.Router;
+import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.client.WebClient;
 import io.vertx.ext.web.client.WebClientOptions;
 import io.vertx.ext.web.handler.BodyHandler;
@@ -24,7 +27,7 @@ public class EventAnalysisVerticle extends AbstractVerticle {
 
     private static final AtomicInteger COUNTER = new AtomicInteger();
 
-
+    private List<String> events = new ArrayList<>();
 
     private void init() {
 
@@ -138,6 +141,7 @@ public class EventAnalysisVerticle extends AbstractVerticle {
             for (ConsumerRecord<String, String> record : records)
             {
                System.out.println("Received message no. {}: {} / {} (from topic {}, partition {}, offset {})"+ ++messageNo+ record.key()+ record.value()+ record.topic()+ record.partition()+ record.offset());
+               events.add(record.value()+record);
             }
 
             consumer.commitSync();
@@ -158,6 +162,7 @@ public class EventAnalysisVerticle extends AbstractVerticle {
         init();
 
         Router router = Router.router(vertx);
+        router.post("/eventStream").handler(this::eventStream);
 
         router.route().handler(BodyHandler.create());
 
@@ -175,6 +180,19 @@ public class EventAnalysisVerticle extends AbstractVerticle {
     }
 
 
+    private void eventStream(RoutingContext routingContext) {
+
+
+
+
+        if(null != events && !events.isEmpty()) {
+            routingContext.response().setStatusCode(201).putHeader("content-type", "application/json")
+                    .end(Json.encodePrettily(new Gson().toJson(events)));
+        }
+
+
+
+    }
 
 
 }
